@@ -2,8 +2,6 @@ import fdasrsf as fs
 import matplotlib.pyplot as plt
 import numpy as np
 
-import tools
-
 
 def alignment_FR(los):  # TODO: check if FR without same time values works
     f = np.array(
@@ -17,6 +15,6 @@ def alignment_FR(los):  # TODO: check if FR without same time values works
             0
         ]  # pas une fonc, pas sur tout le spec
         print(warp.shape, time.shape)
-        tools.interpolation(los[i], 0, out_coord=warp, in_coord=time)
+        los[i].grid.interpolate_axis(los[i], 0, out_coord=warp, in_coord=time)
 
     fdawarp.plot()

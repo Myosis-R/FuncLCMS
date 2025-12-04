@@ -4,7 +4,6 @@ import fisher_rao as fr
 import optimal_transport as ot
 import plot
 import save
-import tools
 from pipeline import Pipeline, PipelineStep
 from spectrum import List_of_Spectrum
 
@@ -42,18 +41,32 @@ def main():
             mode="per_list",
             name="standardize_all",
         ),
+        PipelineStep(
+            obj=ot,
+            attr="strip_ot",
+            args={
+                "min_zero": 15,
+                "min_points": 40000,
+                "reg": 1e-1,
+                "reg_m": 1.0,
+                "cost": "sqeuclidean",
+                "mode": "barycentric",
+            },
+            mode="per_list",
+            name="strip_ot",
+        ),
         # Per-list plotting
         PipelineStep(
             obj=plot,
             attr="TICs",
-            args={"axis": 1, "boolean": False},
+            args={"axis": 0, "boolean": False},
             mode="per_list",
             name="TICs_false",
         ),
         PipelineStep(
             obj=plot,
             attr="TICs",
-            args={"axis": 1, "boolean": True},
+            args={"axis": 0, "boolean": True},
             mode="per_list",
             name="TICs_true",
         ),

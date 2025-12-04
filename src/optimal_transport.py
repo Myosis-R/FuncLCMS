@@ -7,7 +7,7 @@ import scipy.sparse as sp
 from ot.unbalanced import sinkhorn_unbalanced
 from ptw import ptw
 from scipy.optimize import minimize
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_array
 
 # from SWGG import swgg
 
@@ -24,7 +24,7 @@ def translation_f(t, ref, s):  # TODO: optim roll, exact result ?
 
 def translation_grad_tmz(los):  # TODO: change ref, add axis
     assert los.all_grids_standard()
-    tics = np.array([s.grid.sum_along_axis(0, boolean=True) for s in los])
+    tics = np.array([s.grid.sum_along_axis(0, boolean=True)[1] for s in los])
     ref = tics[0]
     for i, s in enumerate(los[1:]):
         translation = minimize(translation_f, 0, args=(ref, tics[i]))[
@@ -51,7 +51,7 @@ def zero_runs(a, min_zero):
 
 def find_strip(los, min_zero, optimal=False, min_points=40_000):
     assert los.all_grids_standard()
-    mean_tics = np.array([s.grid.sum_along_axis(0, boolean=True) for s in los]).mean(
+    mean_tics = np.array([s.grid.sum_along_axis(1, boolean=True)[1] for s in los]).mean(
         axis=0
     )
     strips = zero_runs(mean_tics, min_zero=min_zero)
@@ -59,18 +59,27 @@ def find_strip(los, min_zero, optimal=False, min_points=40_000):
         [np.sum(mean_tics[strips[i, 0] : strips[i, 1]]) for i in range(len(strips))]
     )
     if optimal:  # FIX: avoid empty interval
-        idx = np.searchsorted(np.cumsum(sum_strips),np.arange(0,sum_strips.sum(),min_points))
-        strip = np.roll(np.roll(strip,1)[idx,:],-1) # HACK: need check
+        idx = np.searchsorted(
+            np.cumsum(sum_strips), np.arange(0, sum_strips.sum(), min_points)
+        )  # WARN: case of >40_000 strip
+        strips = np.roll(np.roll(strips, 1)[idx, :], -1)  # HACK: need check
 
     return (strips, sum_strips)
 
 
 #################### strip        #######################
 
-def strip_ot(los, params):
-    strips, sum_strips = find_strip(los, params["length"])
-    for strip in strips:
-        for 
+
+def strip_ot(los, **params):
+    strips, _ = find_strip(los, params["min_zero"], optimal=True)
+    for i, strip in enumerate(strips):
+        print(i / len(strips))
+        ref = los[0].grid.data[:, strip[0] : strip[1]].sum(axis=1)
+        for s in los:
+            _, s.grid.data[:, strip[0] : strip[1]] = ot_align_1d(
+                s.grid.data[:, strip[0] : strip[1]],
+                ref=ref,
+            )  # TODO: check that inplace works, csc?
 
 
 def ot_align_1d(
@@ -85,11 +94,11 @@ def ot_align_1d(
     Align a 2D sparse matrix along rows using 1D unbalanced OT, reducing
     the OT plan to an index-valued map m.
 
-    Functional style: X is NOT modified in place. A new csr_matrix is returned.
+    Functional style: X is NOT modified in place. A new csr_array is returned.
 
     Parameters
     ----------
-    X : scipy.sparse.csr_matrix, shape (n_rows, n_cols)
+    X : scipy.sparse.csr_array, shape (n_rows, n_cols)
         Source matrix.
 
     ref : array_like, shape (n_rows,)
@@ -117,11 +126,11 @@ def ot_align_1d(
     m : ndarray, shape (n_rows,)
         Integer index map. m[i] = k means row i is transported to row k.
 
-    X_aligned : csr_matrix, shape (n_rows, n_cols)
+    X_aligned : csr_array, shape (n_rows, n_cols)
         New matrix with rows permuted/merged according to m.
     """
-    if not isinstance(X, csr_matrix):
-        raise TypeError("X must be a scipy.sparse.csr_matrix")
+    if not isinstance(X, csr_array):
+        raise TypeError("X must be a scipy.sparse.csr_array")
 
     n_rows, _ = X.shape
 
@@ -218,8 +227,8 @@ def _apply_row_map_csr(X, m):
     row i of X to row m[i]. Row contents are merged (with duplicate (row,col)
     entries summed by CSR mechanics).
     """
-    if not isinstance(X, csr_matrix):
-        raise TypeError("X must be a scipy.sparse.csr_matrix")
+    if not isinstance(X, csr_array):
+        raise TypeError("X must be a scipy.sparse.csr_array")
 
     n_rows, n_cols = X.shape
     if m.shape[0] != n_rows:
@@ -265,7 +274,7 @@ def _apply_row_map_csr(X, m):
 
         write_pos[k] = dst_end
 
-    X_new = csr_matrix((new_data, new_indices, new_indptr), shape=(n_rows, n_cols))
+    X_new = csr_array((new_data, new_indices, new_indptr), shape=(n_rows, n_cols))
     X_new.sum_duplicates()
 
     return X_new
