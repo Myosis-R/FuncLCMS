@@ -71,99 +71,347 @@ def find_strip(los, min_zero, optimal=False, min_points=40_000):
 
 
 def strip_ot(los, **params):
+    """
+    Align each strip independently along the first axis using 1D balanced OT
+    with a dustbin cost (cost-threshold OT).
+
+    Parameters in **params
+    ----------------------
+    min_zero : int
+        Minimum run length of zeros to define strips (passed to find_strip).
+
+    dust_cost : float
+        Dustbin cost C_dust. Real-to-dustbin and dustbin-to-real moves cost
+        C_dust, so going through the dustbin instead of direct transport
+        costs 2 * C_dust. This acts as a distance threshold.
+
+    binarize : bool, optional (default: False)
+        If True, build the 1D histograms from presence/absence (X > 0)
+        instead of intensities. If False, use the actual intensities.
+
+    cost : {"sqeuclidean"}, optional (default: "sqeuclidean")
+        Ground cost on the 1D row grid. Currently only "sqeuclidean"
+        is implemented: C[i, j] = (i - j)**2.
+    """
+
+    # Required parameters
     strips, _ = find_strip(los, params["min_zero"], optimal=True)
-    for i, strip in enumerate(strips):
-        print(i / len(strips))
-        ref = los[0].grid.data[:, strip[0] : strip[1]].astype(bool).sum(axis=1)
+    dust_cost = params["dust_cost"]
+
+    # Optional parameters
+    binarize = params.get("binarize", False)
+    cost = params.get("cost", "sqeuclidean")
+
+    n_strips = len(strips)
+
+    for k, strip in enumerate(strips):
+        print(f"strip {k + 1}/{n_strips}")
+
+        # Reference histogram from the first sample on this strip
+        ref_block = los[0].grid.data[:, strip[0] : strip[1]]
+
+        if binarize:
+            ref = ref_block.astype(bool).sum(axis=1)
+        else:
+            ref = ref_block.sum(axis=1)
+
+        # Make sure this is a 1D float array
+        ref = np.asarray(ref).ravel().astype(float)
+
+        # Align each sample to that reference
         for s in los:
-            _, s.grid.data[:, strip[0] : strip[1]] = ot_align_1d(
-                s.grid.data[:, strip[0] : strip[1]].astype(bool),
+            block = s.grid.data[:, strip[0] : strip[1]]
+
+            _, aligned_block = ot_align_1d(
+                block,
                 ref=ref,
-                reg=params["reg"],
-                reg_m=params["reg_m"],
-                mode=params["mode"],
-            )  # TODO: check that inplace works, csc?
+                dust_cost=dust_cost,
+                cost=cost,
+                binarize=binarize,
+            )
+
+            # In-place replacement of the strip data
+            s.grid.data[:, strip[0] : strip[1]] = aligned_block
+
+    # TODO: check that inplace works for your grid storage format (csc/csr/etc.)
 
 
 def ot_align_1d(
     X,
     ref,
-    reg=1e-1,
-    reg_m=1.0,
+    dust_cost,
     cost="sqeuclidean",
-    mode="barycentric",  # or "argmax"
+    binarize=False,
 ):
     """
-    Align a 2D sparse matrix along rows using 1D unbalanced OT, reducing
-    the OT plan to an index-valued map m.
+    Align a 2D matrix along rows using 1D *balanced* OT with a dustbin
+    (cost-threshold OT) and warp X using the full OT plan.
 
-    Functional style: X is NOT modified in place. A new csr_array is returned.
+    The OT is solved on the 1D row histograms:
+      - source: a[i] = row sum of X[i, :]
+      - target: b[i] = ref[i]
+
+    We construct an augmented problem with one dustbin index d:
+
+      - a_ext = [a, sum(b)]
+      - b_ext = [b, sum(a)]
+
+      - For real i, real j:     C[i, j]   = (i - j)**2  (if cost == "sqeuclidean")
+      - For real i, dustbin d:  C[i, d]   = dust_cost
+      - For dustbin d, real j:  C[d, j]   = dust_cost
+      - For dustbin d, d:       C[d, d]   = 0
+
+    Solving balanced EMD on (a_ext, b_ext, C_ext) yields a plan Gamma_ext.
+    We then restrict to the real-real block Gamma_real and warp X as follows:
+
+      - matched_mass_i = sum_j Gamma_real[i, j]
+      - alpha_i = matched_mass_i / a[i]   (fraction of row i to move)
+      - matched part (alpha_i * row_i) is redistributed to targets j
+        with weights Gamma_real[i, j] / matched_mass_i
+      - unmatched part ((1 - alpha_i) * row_i) stays at row i.
 
     Parameters
     ----------
-    X : scipy.sparse.csr_array, shape (n_rows, n_cols)
-        Source matrix.
-
+    X : array-like or scipy.sparse matrix, shape (n_rows, n_cols)
+        Source matrix to be warped along rows.
     ref : array_like, shape (n_rows,)
-        Reference 1D distribution along the row axis.
-        Must satisfy len(ref) == n_rows. Non-negative.
-
-    reg : float, default=1e-1
-        Entropic regularization parameter for unbalanced Sinkhorn.
-
-    reg_m : float, default=1.0
-        Mass regularization parameter for unbalanced OT.
-
-    cost : {"sqeuclidean"}, default="sqeuclidean"
-        Ground cost on the 1D row grid: currently (i - j)**2 in the
-        original row index space.
-
-    mode : {"barycentric", "argmax"}, default="barycentric"
-        How to extract a discrete row index map from the OT plan:
-        - "barycentric": barycentric projection in index space + rounding.
-        - "argmax":      m[i] = argmax_j gamma[i, j], with identity
-                         fallback on empty rows.
+        Target 1D histogram along the row axis (non-negative).
+    dust_cost : float
+        Dustbin cost C_dust used in the augmented cost matrix.
+    cost : {"sqeuclidean"}, optional
+        Ground cost on the 1D row grid. Currently only "sqeuclidean"
+        is implemented: C[i, j] = (i - j)**2.
+    binarize : bool, optional (default: False)
+        If True, build histograms from presence/absence (X > 0)
+        instead of intensities.
 
     Returns
     -------
-    m : ndarray, shape (n_rows,)
-        Integer index map. m[i] = k means row i is transported to row k.
-
+    Gamma_real : ndarray, shape (n_rows, n_rows)
+        OT plan restricted to real rows/cols (zeros on dustbin).
     X_aligned : csr_array, shape (n_rows, n_cols)
-        New matrix with rows permuted/merged according to m.
+        Row-warped matrix. Matched mass moves according to Gamma_real;
+        unmatched mass stays at its original row.
     """
-    if not isinstance(X, csr_array):
-        raise TypeError("X must be a scipy.sparse.csr_array")
 
-    n_rows, _ = X.shape
+    # Ensure CSR sparse array
+    if isinstance(X, csr_array):
+        X_csr = X.copy()
+    elif sp.issparse(X):
+        X_csr = csr_array(X)
+    else:
+        X_csr = csr_array(X)
 
-    # row sums (source)
-    a = np.asarray(X.sum(axis=1)).ravel().astype(float)
+    n_rows, _ = X_csr.shape
+
+    # Source histogram a
+    if binarize:
+        X_mask = X_csr.copy()
+        if X_mask.nnz > 0:
+            X_mask.data[:] = 1.0
+        a = np.asarray(X_mask.sum(axis=1)).ravel().astype(float)
+    else:
+        a = np.asarray(X_csr.sum(axis=1)).ravel().astype(float)
+
     if np.any(a < 0):
         raise ValueError("Row sums of X must be non-negative")
 
-    # reference (target)
+    # Target histogram b
     b = np.asarray(ref, dtype=float).ravel()
     if b.shape[0] != n_rows:
         raise ValueError(f"ref must have length {n_rows}, got {b.shape[0]}")
     if np.any(b < 0):
         raise ValueError("ref must be non-negative")
 
-    # compute discrete row map via OT (support reduction inside)
-    m = _ot_row_map_1d_full(a, b, reg=reg, reg_m=reg_m, cost=cost, mode=mode)
+    # Solve balanced OT with an explicit dustbin
+    Gamma_real = _balanced_ot_with_dustbin_1d(a, b, dust_cost=dust_cost, cost=cost)
 
+    # If there is effectively no transport, return X as-is
+    if np.allclose(Gamma_real, 0.0):
+        return Gamma_real, X_csr
+
+    # Warp rows using the OT plan; unmatched mass stays in place
+    X_aligned = _warp_rows_by_plan_csr(X_csr, a, Gamma_real)
+
+    # TEST:
     fig, ax = plt.subplots()
-    ax.plot(np.arange(len(a)), a, "r-")
-    ax.plot(np.arange(len(a)), b, "b-")
-    ax.plot(np.arange(len(a)), m, "g-")
-
-    # apply map to CSR, return new matrix
-    X_aligned = _apply_row_map_csr(X, m)
-
-    c = np.asarray(X_aligned.sum(axis=1)).ravel().astype(float)
-    ax.plot(np.arange(len(a)), c, "k-")
+    x = np.arange(len(a))
+    ax.plot(x, a, "b-", label="source")
+    ax.plot(x, b, "r-", label="target")
+    ax.plot(x, X_aligned.sum(axis=1), "k-", label="aligned")
+    plt.legend()
     plt.show()
-    return m, X_aligned
+
+    return Gamma_real, X_aligned
+
+
+def _balanced_ot_with_dustbin_1d(a, b, dust_cost, cost="sqeuclidean"):
+    """
+    Solve 1D balanced OT with an explicit dustbin using Earth Mover's Distance,
+    restricted to active indices (a[i] > 0 or b[i] > 0).
+
+    Implementation details
+    ----------------------
+    - We only build the OT problem on the active support:
+        active = (a > 0) | (b > 0)
+      and work in that compressed index space.
+
+    - Ground cost is squared distance along the *row index* axis, but we
+      normalize indices to avoid very large values:
+
+          coords = idx / scale,   with scale = max(1, n - 1)
+
+      so that coords lie roughly in [0, 1] and (coords_i - coords_j)^2 <= 1.
+
+    - To keep the semantics of dust_cost unchanged (it is interpreted in the
+      original index^2 units), we scale it internally:
+
+          dust_cost_scaled = dust_cost / scale**2
+
+      The entire augmented cost matrix is therefore the original one divided
+      by scale**2, which does NOT change the optimal OT plan.
+
+    - To improve numerical stability of POT's LP solver, we normalize the
+      augmented marginals a_ext, b_ext to the simplex (sum ≈ 1) before
+      calling ot.emd, then rescale the resulting plan back to the original
+      total mass.
+
+    Augmented problem on the active support
+    ---------------------------------------
+    Let k = number of active indices.
+
+    a_act, b_act in R^k_+ (compressed versions of a, b),
+    sa = sum(a_act), sb = sum(b_act).
+
+    a_ext = [a_act, sb]
+    b_ext = [b_act, sa]
+
+    Cost matrix C_ext (size (k+1, k+1)):
+
+      - For p < k, q < k:
+            C_ext[p, q] = (coords_p - coords_q)^2  (in normalized units)
+
+      - For p < k, q = k:
+            C_ext[p, k] = dust_cost_scaled         (real -> dustbin)
+      - For p = k, q < k:
+            C_ext[k, q] = dust_cost_scaled         (dustbin -> real)
+      - For p = k, q = k:
+            C_ext[k, k] = 0.0                      (dustbin -> dustbin)
+
+    Then:
+
+        Gamma_ext = ot.emd(a_ext, b_ext, C_ext)
+
+    and we set Gamma_full[i, j] = Gamma_ext[p, q] for active indices
+    i = idx[p], j = idx[q], and 0 elsewhere.
+
+    Parameters
+    ----------
+    a : array_like, shape (n,)
+        Source histogram (non-negative).
+    b : array_like, shape (n,)
+        Target histogram (non-negative).
+    dust_cost : float
+        Dustbin cost in the ORIGINAL (index^2) distance units.
+    cost : {"sqeuclidean"}, optional
+        Ground cost on the 1D row grid.
+
+    Returns
+    -------
+    Gamma_full : ndarray, shape (n, n)
+        Real-real OT plan on the full index set; rows/cols where a[i] = b[i] = 0
+        are identically zero.
+    """
+    a = np.asarray(a, dtype=float).ravel()
+    b = np.asarray(b, dtype=float).ravel()
+
+    n = a.shape[0]
+    if b.shape[0] != n:
+        raise ValueError(f"a and b must have the same length, got {n} and {b.shape[0]}")
+
+    # Active support: indices where there is some mass in a or b
+    active = (a > 0.0) | (b > 0.0)
+    idx = np.nonzero(active)[0]
+    k = idx.size
+
+    # If no active point, nothing to transport
+    if k == 0:
+        return np.zeros((n, n), dtype=float)
+
+    # Compressed histograms on the active support
+    a_act = a[active]
+    b_act = b[active]
+
+    sa = float(a_act.sum())
+    sb = float(b_act.sum())
+
+    # If both are (numerically) empty, nothing to transport
+    if sa <= 0.0 and sb <= 0.0:
+        return np.zeros((n, n), dtype=float)
+
+    # Augmented marginals on the active support
+    a_ext = np.concatenate([a_act, [sb]]).astype(float)
+    b_ext = np.concatenate([b_act, [sa]]).astype(float)
+
+    # ---- Clean & normalize for POT (improves numerical stability) ----
+    # Replace NaN / inf by 0
+    a_ext[~np.isfinite(a_ext)] = 0.0
+    b_ext[~np.isfinite(b_ext)] = 0.0
+
+    # Clip tiny negative values (from numerical noise) to 0
+    a_ext = np.clip(a_ext, 0.0, None)
+    b_ext = np.clip(b_ext, 0.0, None)
+
+    mass_a = float(a_ext.sum())
+    mass_b = float(b_ext.sum())
+
+    # If both sides are empty after cleaning: nothing to transport
+    if mass_a <= 0.0 and mass_b <= 0.0:
+        return np.zeros((n, n), dtype=float)
+
+    # If only one side is empty, also return zeros (pathological input)
+    if mass_a <= 0.0 or mass_b <= 0.0:
+        return np.zeros((n, n), dtype=float)
+
+    # They should be equal by construction; use their mean as robust scale
+    mass_ext = 0.5 * (mass_a + mass_b)
+
+    # Normalize to a probability simplex (sum ≈ 1)
+    a_ext /= mass_ext
+    b_ext /= mass_ext
+
+    # Cost matrix on the active indices: use normalized original positions
+    if cost == "sqeuclidean":
+        # Normalize indices to keep squared distances ~ O(1)
+        # This scaling is compensated in dust_cost so the OT plan is unchanged.
+        scale = max(1.0, float(n - 1))
+        coords = idx.astype(float) / scale
+        C_real = (coords[:, None] - coords[None, :]) ** 2
+
+        dust_cost_scaled = dust_cost / (scale**2)
+    else:
+        raise ValueError(f"Unsupported cost: {cost!r}")
+
+    C_ext = np.empty((k + 1, k + 1), dtype=float)
+    C_ext[:k, :k] = C_real
+    C_ext[:k, k] = dust_cost_scaled  # real -> dustbin
+    C_ext[k, :k] = dust_cost_scaled  # dustbin -> real
+    C_ext[k, k] = 0.0  # dustbin -> dustbin
+
+    # Balanced Earth Mover's Distance on the compressed + dustbin problem
+    Gamma_ext = ot.emd(a_ext, b_ext, C_ext)
+
+    # Rescale transport plan back to original total mass
+    Gamma_ext *= mass_ext
+
+    # Real-real block on the compressed support
+    Gamma_act = np.asarray(Gamma_ext[:k, :k], dtype=float)
+
+    # Expand back to full (n, n), filling inactive rows/cols with zeros
+    Gamma_full = np.zeros((n, n), dtype=float)
+    Gamma_full[np.ix_(idx, idx)] = Gamma_act
+
+    return Gamma_full
 
 
 def plan_to_kernel(Gamma):
@@ -191,145 +439,116 @@ def plan_to_kernel(Gamma):
     return K
 
 
-def _ot_row_map_1d(a, b, reg, reg_m, cost, mode):
+def _warp_rows_by_plan_csr(X, a, Gamma, tol=1e-12):
     """
-    Compute a discrete row map m from 1D unbalanced OT between histograms a, b.
-    a, b are 1D non-negative arrays of same length n_rows.
+    Warp a CSR matrix X along rows according to transport plan Gamma.
+
+    For each row i:
+      - matched_mass_i = sum_j Gamma[i, j]
+      - alpha_i = matched_mass_i / a[i]   (fraction of the row to move)
+      - matched part (alpha_i * row_i) is redistributed to targets j
+        with weights Gamma[i, j] / matched_mass_i
+      - unmatched part ((1 - alpha_i) * row_i) stays at row i.
+
+    Parameters
+    ----------
+    X : csr_array, shape (n_rows, n_cols)
+        Source matrix.
+    a : array_like, shape (n_rows,)
+        Row sums of X used to compute the plan (same as in _balanced_ot_with_dustbin_1d).
+    Gamma : array_like, shape (n_rows, n_rows)
+        Real-real part of the OT plan.
+    tol : float, optional
+        Numerical tolerance for discarding tiny weights.
+
+    Returns
+    -------
+    X_warped : csr_array, shape (n_rows, n_cols)
+        Row-warped matrix.
     """
-    n_rows = a.shape[0]
-    m = np.arange(n_rows, dtype=np.int64)
-
-    # detect active support (rows where either source or target has mass)
-    active = (a > 0) | (b > 0)
-    active_idx = np.flatnonzero(active)
-    n_active = active_idx.size
-
-    if n_active == 0:
-        # nothing to transport: identity map
-        return m
-
-    a_active = a[active_idx]
-    b_active = b[active_idx]
-
-    # cost matrix on active support
-    if cost == "sqeuclidean":
-        # normalize indices to [0, 1] to keep the cost scale bounded
-        coords = active_idx.astype(float) / max(n_rows - 1, 1)
-        i_coords = coords[:, None]
-        j_coords = coords[None, :]
-        C = (i_coords - j_coords) ** 2
-    else:
-        raise ValueError(f"Unsupported cost: {cost!r}")
-
-    # unbalanced OT plan on the reduced support
-    gamma_active, log = sinkhorn_unbalanced(
-        a_active,
-        b_active,
-        C,
-        reg=reg,
-        reg_m=reg_m,
-        method="sinkhorn_stabilized",
-        verbose=True,
-        log=True,
-    )  # FIX: clean
-    # gamma_active = ot.partial.partial_wasserstein(
-    #     a_active, b_active, C, m=0.8,nb_dummies=400)
-
-    print(log)
-
-    row_sums_active = gamma_active.sum(axis=1)
-
-    # rows with some transported mass in the plan
-    has_mass = row_sums_active > 0
-
-    if mode == "barycentric":
-        # barycentric projection of indices, then round to nearest integer index
-        j_coords = active_idx[None, :].astype(float)  # shape (1, n_active)
-        # avoid division by zero by masking has_mass
-        bary = np.zeros_like(row_sums_active, dtype=float)
-        bary[has_mass] = (gamma_active[has_mass, :] * j_coords).sum(
-            axis=1
-        ) / row_sums_active[has_mass]
-        k_active = np.rint(bary).astype(np.int64)
-        k_active = np.clip(k_active, 0, n_rows - 1)
-
-        # fallback: identity for rows with no mass in the plan
-        k_active[~has_mass] = active_idx[~has_mass]
-        m_active = k_active
-
-    elif mode == "argmax":
-        # send each active row to the target with max transported mass
-        j_active = np.asarray(gamma_active.argmax(axis=1)).ravel()
-        m_active = active_idx[j_active]
-
-        # fallback: identity for rows with no mass in the plan
-        m_active[~has_mass] = active_idx[~has_mass]
-
-    else:
-        raise ValueError(f"Unknown mode {mode!r} (use 'barycentric' or 'argmax')")
-
-    m[active_idx] = m_active
-    return m
-
-
-def _apply_row_map_csr(X, m):
-    """
-    Given a CSR matrix X and a row map m (1D int array, m[i] = target row),
-    build a new CSR matrix whose rows are the result of transporting each
-    row i of X to row m[i]. Row contents are merged (with duplicate (row,col)
-    entries summed by CSR mechanics).
-    """
-    if not isinstance(X, csr_array):
-        raise TypeError("X must be a scipy.sparse.csr_array")
-
+    X = csr_array(X)  # ensure CSR array
     n_rows, n_cols = X.shape
-    if m.shape[0] != n_rows:
-        raise ValueError(f"m must have length {n_rows}, got {m.shape[0]}")
+
+    a = np.asarray(a, dtype=float).ravel()
+    Gamma = np.asarray(Gamma, dtype=float)
 
     indptr = X.indptr
     indices = X.indices
     data = X.data
 
-    # 1st pass: count nnz going to each target row
-    counts = np.zeros(n_rows, dtype=np.int64)
+    # Matched mass per row, and fraction alpha_i to move
+    matched = Gamma.sum(axis=1)
+    matched = np.asarray(matched).ravel()
+
+    alpha = np.zeros(n_rows, dtype=float)
+    valid = (a > 0.0) & (matched > 0.0)
+    alpha[valid] = np.minimum(matched[valid] / a[valid], 1.0)
+
+    # Split rows into matched and unmatched parts
+    data_matched = data.copy()
     for i in range(n_rows):
-        k = m[i]
-        if k < 0 or k >= n_rows:
-            raise ValueError(f"m[{i}] = {k} is out of bounds for n_rows={n_rows}")
-        row_len = indptr[i + 1] - indptr[i]
-        counts[k] += row_len
+        row_start, row_end = indptr[i], indptr[i + 1]
+        if row_start == row_end:
+            continue
+        ai = alpha[i]
+        if ai == 0.0:
+            data_matched[row_start:row_end] = 0.0
+        elif ai != 1.0:
+            data_matched[row_start:row_end] *= ai
 
-    # prefix sum -> new indptr
-    new_indptr = np.empty(n_rows + 1, dtype=np.int64)
-    new_indptr[0] = 0
-    np.cumsum(counts, out=new_indptr[1:])
+    data_unmatched = data - data_matched
 
-    total_nnz = int(new_indptr[-1])
-    new_indices = np.empty(total_nnz, dtype=indices.dtype)
-    new_data = np.empty(total_nnz, dtype=data.dtype)
+    # Unmatched part: stays at original rows
+    X_unmatched = csr_array(
+        (data_unmatched, indices.copy(), indptr.copy()), shape=X.shape
+    )
 
-    # 2nd pass: copy row blocks into their target rows
-    write_pos = new_indptr[:-1].copy()
+    # Matched part: transported according to Gamma
+    rows_list = []
+    cols_list = []
+    vals_list = []
+
     for i in range(n_rows):
-        k = m[i]
-        start = indptr[i]
-        end = indptr[i + 1]
-        length = end - start
-        if length == 0:
+        ai = alpha[i]
+        if ai <= 0.0:
             continue
 
-        dst_start = write_pos[k]
-        dst_end = dst_start + length
+        row_start, row_end = indptr[i], indptr[i + 1]
+        if row_start == row_end:
+            continue
 
-        new_indices[dst_start:dst_end] = indices[start:end]
-        new_data[dst_start:dst_end] = data[start:end]
+        gi = Gamma[i, :]
+        mass_i = gi.sum()
+        if mass_i <= tol:
+            continue
 
-        write_pos[k] = dst_end
+        w = gi / mass_i
+        dest = np.nonzero(w > tol)[0]
+        if dest.size == 0:
+            continue
 
-    X_new = csr_array((new_data, new_indices, new_indptr), shape=(n_rows, n_cols))
-    X_new.sum_duplicates()
+        row_cols = indices[row_start:row_end]
+        row_vals = data_matched[row_start:row_end]
 
-    return X_new
+        for j in dest:
+            wij = w[j]
+            if wij <= 0.0:
+                continue
+            rows_list.append(np.full(row_cols.shape, j, dtype=int))
+            cols_list.append(row_cols)
+            vals_list.append(row_vals * wij)
+
+    if rows_list:
+        rows_cat = np.concatenate(rows_list)
+        cols_cat = np.concatenate(cols_list)
+        vals_cat = np.concatenate(vals_list)
+        X_moved = csr_array((vals_cat, (rows_cat, cols_cat)), shape=X.shape)
+        X_moved.sum_duplicates()
+    else:
+        # No matched mass transported
+        X_moved = csr_array((n_rows, n_cols))
+
+    return X_unmatched + X_moved
 
 
 #################### hierarchical #######################
