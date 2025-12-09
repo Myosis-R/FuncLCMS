@@ -47,8 +47,8 @@ def main():
             args={
                 "min_zero": 15,
                 "min_points": 40000,
-                "reg": 1e-1,
-                "reg_m": 1.0,
+                "reg": 0.001,
+                "reg_m": 0.001,
                 "cost": "sqeuclidean",
                 "mode": "barycentric",
             },

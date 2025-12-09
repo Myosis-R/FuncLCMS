@@ -74,11 +74,14 @@ def strip_ot(los, **params):
     strips, _ = find_strip(los, params["min_zero"], optimal=True)
     for i, strip in enumerate(strips):
         print(i / len(strips))
-        ref = los[0].grid.data[:, strip[0] : strip[1]].sum(axis=1)
+        ref = los[0].grid.data[:, strip[0] : strip[1]].astype(bool).sum(axis=1)
         for s in los:
             _, s.grid.data[:, strip[0] : strip[1]] = ot_align_1d(
-                s.grid.data[:, strip[0] : strip[1]],
+                s.grid.data[:, strip[0] : strip[1]].astype(bool),
                 ref=ref,
+                reg=params["reg"],
+                reg_m=params["reg_m"],
+                mode=params["mode"],
             )  # TODO: check that inplace works, csc?
 
 
@@ -147,12 +150,45 @@ def ot_align_1d(
         raise ValueError("ref must be non-negative")
 
     # compute discrete row map via OT (support reduction inside)
-    m = _ot_row_map_1d(a, b, reg=reg, reg_m=reg_m, cost=cost, mode=mode)
+    m = _ot_row_map_1d_full(a, b, reg=reg, reg_m=reg_m, cost=cost, mode=mode)
+
+    fig, ax = plt.subplots()
+    ax.plot(np.arange(len(a)), a, "r-")
+    ax.plot(np.arange(len(a)), b, "b-")
+    ax.plot(np.arange(len(a)), m, "g-")
 
     # apply map to CSR, return new matrix
     X_aligned = _apply_row_map_csr(X, m)
 
+    c = np.asarray(X_aligned.sum(axis=1)).ravel().astype(float)
+    ax.plot(np.arange(len(a)), c, "k-")
+    plt.show()
     return m, X_aligned
+
+
+def plan_to_kernel(Gamma):
+    """
+    Convert a transport plan Gamma (shape: [n_source, n_target])
+    into a kernel K(y|x) by normalizing each row.
+
+    Parameters
+    ----------
+    Gamma : array_like, shape (n_source, n_target)
+        Transport plan (non-negative entries).
+
+    Returns
+    -------
+    K : ndarray, shape (n_source, n_target)
+        Row-stochastic kernel: each row sums to 1, except rows that were all-zero
+        in Gamma, which remain all-zero.
+    """
+
+    Gamma = np.asarray(Gamma, dtype=float)
+    row_sums = Gamma.sum(axis=1, keepdims=True)  # shape (n_source, 1)
+    # Initialize K as zeros and safely divide where row_sums > 0
+    K = np.zeros_like(Gamma)
+    np.divide(Gamma, row_sums, out=K, where=(row_sums > 0))
+    return K
 
 
 def _ot_row_map_1d(a, b, reg, reg_m, cost, mode):
@@ -177,14 +213,30 @@ def _ot_row_map_1d(a, b, reg, reg_m, cost, mode):
 
     # cost matrix on active support
     if cost == "sqeuclidean":
-        i_coords = active_idx[:, None].astype(float)
-        j_coords = active_idx[None, :].astype(float)
+        # normalize indices to [0, 1] to keep the cost scale bounded
+        coords = active_idx.astype(float) / max(n_rows - 1, 1)
+        i_coords = coords[:, None]
+        j_coords = coords[None, :]
         C = (i_coords - j_coords) ** 2
     else:
         raise ValueError(f"Unsupported cost: {cost!r}")
 
     # unbalanced OT plan on the reduced support
-    gamma_active = sinkhorn_unbalanced(a_active, b_active, C, reg=reg, reg_m=reg_m)
+    gamma_active, log = sinkhorn_unbalanced(
+        a_active,
+        b_active,
+        C,
+        reg=reg,
+        reg_m=reg_m,
+        method="sinkhorn_stabilized",
+        verbose=True,
+        log=True,
+    )  # FIX: clean
+    # gamma_active = ot.partial.partial_wasserstein(
+    #     a_active, b_active, C, m=0.8,nb_dummies=400)
+
+    print(log)
+
     row_sums_active = gamma_active.sum(axis=1)
 
     # rows with some transported mass in the plan
