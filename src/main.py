@@ -43,17 +43,31 @@ def main():
         ),
         PipelineStep(
             obj=ot,
-            attr="strip_ot",
+            attr="hierarchical_ot",
             args={
                 "min_zero": 15,
                 "min_points": 40000,
-                "dust_cost": 0.001,
+                "dust_cost": 500,
+                "dust_cost_comp": 1000,
                 "cost": "sqeuclidean",
-                "mode": "barycentric",
+                "binarize": False,
             },
             mode="per_list",
             name="strip_ot",
         ),
+        # PipelineStep(
+        #     obj=ot,
+        #     attr="strip_ot",
+        #     args={
+        #         "min_zero": 15,
+        #         "min_points": 40000,
+        #         "dust_cost": 500,  # ~20 index ~ 10 seconds !nop
+        #         "cost": "sqeuclidean",
+        #         "binarize": False,
+        #     },
+        #     mode="per_list",
+        #     name="strip_ot",
+        # ),
         # Per-list plotting
         PipelineStep(
             obj=plot,
