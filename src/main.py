@@ -50,7 +50,6 @@ def main():
                 "dust_cost": 500,
                 "dust_cost_comp": 1000,
                 "cost": "sqeuclidean",
-                "binarize": False,
             },
             mode="per_list",
             name="strip_ot",

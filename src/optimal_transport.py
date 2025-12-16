@@ -18,6 +18,7 @@ def swgg(los):  # NOTE: explain name and ref
 
 
 def translation_f(t, ref, s):  # TODO: optim roll, exact result ?
+    t = float(t)
     t, c = np.divmod(t, 1)
     s = c * np.roll(s, -t - 1) + (1 - c) * np.roll(s, -t)
     return np.linalg.norm(ref - s)
@@ -27,7 +28,7 @@ def translation_grad_tmz(los):  # TODO: change ref, add axis
     assert los.all_grids_standard()
     tics = np.array([s.grid.sum_along_axis(0, boolean=True)[1] for s in los])
     ref = tics[0]
-    for i, s in enumerate(los[1:]):
+    for i, s in enumerate(los[1:], start=1):
         translation = minimize(translation_f, 0, args=(ref, tics[i]))[
             "x"
         ]  # TODO: bound
@@ -38,16 +39,46 @@ def translation_grad_tmz(los):  # TODO: change ref, add axis
 
 
 def zero_runs(a, min_zero):
-    # Create an array that is 1 where a is 0, and pad each end with an extra 0.
+    """
+    Return strips (start, end) of contiguous non-zero regions of `a`,
+    using runs of zeros longer than `min_zero` as separators.
+
+    If there is no such zero-run, returns a single strip (0, len(a)).
+    """
+    a = np.asarray(a)
+    n = len(a)
+    if n == 0:
+        return np.zeros((0, 2), dtype=int)
+
+    # 1 where a is 0, padded with a leading and trailing 0
     iszero = np.concatenate(([0], np.equal(a, 0).view(np.int8), [0]))
     absdiff = np.abs(np.diff(iszero))
-    # Runs start and end where absdiff is 1.
-    ranges = np.where(absdiff == 1)[0].reshape(-1, 2)
-    ranges = np.ravel(ranges[(ranges[:, 1] - ranges[:, 0]) > min_zero, :])
-    assert len(ranges) > 0  # TODO: better test empty array
-    ranges = np.concatenate(([0], ranges)) if ranges[0] != 0 else ranges[1:]
-    ranges = np.concatenate((ranges, [len(a)])) if ranges[-1] != len(a) else ranges[:-1]
-    return ranges.reshape((-1, 2))
+
+    # zero_runs: [start, end) indices of zero segments (in the padded index)
+    zero_bounds = np.where(absdiff == 1)[0].reshape(-1, 2)
+
+    # keep only zero runs longer than min_zero
+    long_zero = zero_bounds[(zero_bounds[:, 1] - zero_bounds[:, 0]) > min_zero]
+
+    # No separator: everything is one strip
+    if long_zero.size == 0:
+        return np.array([[0, n]], dtype=int)
+
+    # Convert zero-run boundaries into strip boundaries
+    ranges = np.ravel(long_zero)
+
+    # Ensure 0 and n are included as strip boundaries
+    if ranges[0] != 0:
+        ranges = np.concatenate(([0], ranges))
+    else:
+        ranges = ranges[1:]
+
+    if ranges[-1] != n:
+        ranges = np.concatenate((ranges, [n]))
+    else:
+        ranges = ranges[:-1]
+
+    return ranges.reshape(-1, 2)
 
 
 def find_strip(los, min_zero, optimal=False, min_points=40_000):
@@ -530,8 +561,8 @@ def _warp_rows_by_plan_csr(X, a, Gamma, tol=1e-12):
 #################### hierarchical #######################
 
 
-def g_f(id, _ndx, _pos):
-    return _ndx[_pos[id] : _pos[id + 1]]
+def g_f(id, _ndx, _pos, _count):
+    return _ndx[_pos[id] : (_pos[id] + _count[id])]
 
 
 def mean_sum_by_labs(X, labs):  # NOTE: X multidim
@@ -540,22 +571,22 @@ def mean_sum_by_labs(X, labs):  # NOTE: X multidim
 
     g_sum = np.add.reduceat(X[_ndx], _pos, axis=0)
     g_sum[:, :-1] = g_sum[:, :-1] / g_count[:, None]
-    g_fp = partial(g_f, _ndx=_ndx, _pos=_pos)
+    g_fp = partial(g_f, _ndx=_ndx, _pos=_pos, _count=g_count)
     return g_sum, g_fp
 
 
 def find_component(ds):
-    clust = scipy.sparse.coo_array(
-        cc3d.connected_components(
-            ds.todense(),
-            binary_image=True,
-            connectivity=8,
-            return_N=True,
-        )[0],
+    A = ds.todense()
+    labels, N = cc3d.connected_components(
+        A > 0, binary_image=True, connectivity=8, return_N=True
     )
+    rows, cols = np.nonzero(labels)
+    labs = labels[rows, cols]
+    intens = A[rows, cols]
+    clust = scipy.sparse.coo_array((labs, (rows, cols)), shape=A.shape)
     clust_df, clust_func = mean_sum_by_labs(
-        np.array([clust.row, clust.col, ds.tocoo().data]).T,
-        clust.data,
+        np.stack([rows, cols, intens], axis=1),
+        labs,
     )
     return clust_df, clust_func
 
@@ -900,8 +931,8 @@ def _balanced_ot_near_target_source_2d(
         The real-real plan from `_balanced_ot_with_dustbin_2d`, only if
         return_plan=True.
     """
-    X = np.asarray(X, dtype=float)
-    Y = np.asarray(Y, dtype=float)
+    X = np.asarray(X, dtype=int)
+    Y = np.asarray(Y, dtype=int)
 
     M = X.shape[0]
     N = Y.shape[0]
@@ -919,14 +950,9 @@ def _balanced_ot_near_target_source_2d(
 
     # 2) Reconstruct source weights a_vec with the SAME convention:
     if a is None:
-        if M > 0:
-            a_vec = np.ones(M, dtype=float) / M
-        else:
-            a_vec = np.zeros(0, dtype=float)
+        a_vec = np.ones(M, dtype=float)
     else:
         a_vec = np.asarray(a, dtype=float)
-        if a_vec.shape != (M,):
-            raise ValueError(f"a must have shape ({M},), got {a_vec.shape}")
 
     # 3) Mass sent from each source to real targets
     mass_to_Y_per_source = Gamma_full.sum(axis=1)  # shape (M,)
@@ -973,7 +999,7 @@ def ot_component(los, strips, dust_cost, dust_cost_comp):
         points_ref_ds = los[0].grid.data[:, strip[0] : strip[1]].tocoo()
         clust_ref_df, clust_ref_func = find_component(points_ref_ds)
         M = len(clust_ref_df)
-        for s in los:
+        for s in los[1:]:  # NOTE: start at 1
             points_ds = s.grid.data[:, strip[0] : strip[1]].tocoo()
             clust_df, clust_func = find_component(points_ds)
             N = len(clust_df)
@@ -986,17 +1012,18 @@ def ot_component(los, strips, dust_cost, dust_cost_comp):
                 axis_weights=[1, 15],  # FIX:
             )
             adj = np.zeros((N + M, N + M))
-            adj[:M, M:] = sol
-            adj[M:, :M] = adj[:M, M:].T
+            adj[:M, M:] = sol.T
+            adj[M:, :M] = sol
             n_comp, labs = scipy.sparse.csgraph.connected_components(
                 adj, directed=False
             )
 
             for i in range(n_comp):
-                clust_i = np.nonzero(labs == i)  # TODO: optim
+                clust_i = np.nonzero(labs == i)[0]  # TODO: optim
                 # TODO: vectorize
-                pt_idx = [pt for c in clust_i if c >= M for pt in clust_func(c)]
+                pt_idx = [pt for c in clust_i if c >= M for pt in clust_func(c - M)]
                 pt_ref_idx = [pt for c in clust_i if c < M for pt in clust_ref_func(c)]
+                print(len(pt_idx), len(pt_ref_idx), i, n_comp)
                 # TODO: sparse type?
                 source = np.array(
                     [
@@ -1021,7 +1048,8 @@ def ot_component(los, strips, dust_cost, dust_cost_comp):
                     axis_weights=[1, 15],
                 )
                 s.grid.data[:, strip[0] : strip[1]] = sp.coo_array(
-                    (tpt_weights, tpt_coord)
+                    (tpt_weights, (tpt_coord[:, 0], tpt_coord[:, 1])),
+                    shape=(s.grid.data.shape[0], strip[1] - strip[0]),
                 ).tocsr()
 
 
