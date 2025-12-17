@@ -1,9 +1,10 @@
 import numpy as np
-import optimal_transport as ot
 
 import fisher_rao as fr
+import hot
 import plot
 import save
+import sot
 from pipeline import Pipeline, PipelineStep
 from spectrum import List_of_Spectrum
 
@@ -42,7 +43,7 @@ def main():
             name="standardize_all",
         ),
         PipelineStep(
-            obj=ot,
+            obj=hot,
             attr="hierarchical_ot",
             args={
                 "min_zero": 15,
@@ -55,7 +56,7 @@ def main():
             name="strip_ot",
         ),
         # PipelineStep(
-        #     obj=ot,
+        #     obj=sot,
         #     attr="strip_ot",
         #     args={
         #         "min_zero": 15,
