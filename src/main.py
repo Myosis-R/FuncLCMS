@@ -17,7 +17,7 @@ def main():
         "format": "cache",  # TODO: both format at the same time
         "name_specification": "date-batch-type-order-drop",
         "name_tweak": True,
-        "pattern": "[F]-QC-[^0]+",  # TODO: check if one
+        "pattern": "[F]-QC-1[12]",  # TODO: check if one
     }
 
     steps = [
