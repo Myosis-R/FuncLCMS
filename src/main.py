@@ -1,7 +1,7 @@
 import numpy as np
+import optimal_transport as ot
 
 import fisher_rao as fr
-import optimal_transport as ot
 import plot
 import save
 from pipeline import Pipeline, PipelineStep
