@@ -9,7 +9,7 @@ def alignment_FR(los):  # TODO: check if FR without same time values works
     )  # HACK: bool
     time = los[0].grid.coord0
     fdawarp = fs.fdawarp(f.T, time)
-    fdawarp.srsf_align(parallel=True)
+    fdawarp.srsf_align(parallel=True)  # FIX: error with scalene ?
     for i in range(len(los)):
         warp = (time[-1] - time[0]) * fdawarp.gam[:, i] + time[
             0
@@ -17,4 +17,4 @@ def alignment_FR(los):  # TODO: check if FR without same time values works
         print(warp.shape, time.shape)
         los[i].grid.interpolate_axis(los[i], 0, out_coord=warp, in_coord=time)
 
-    fdawarp.plot()
+    # fdawarp.plot()

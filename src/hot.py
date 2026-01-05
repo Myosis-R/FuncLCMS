@@ -489,49 +489,106 @@ def _balanced_ot_near_target_source_2d(
 
 
 def ot_component(los, strips, dust_cost, dust_cost_comp):
+    """
+    Hierarchical 2D OT on connected components, per strip, per sample.
+
+    Implementation notes
+    --------------------
+    - We never do in-place sparse slice assignment.
+    - For each *sample* (except reference), we accumulate all transported
+      (row, col, weight) triplets in GLOBAL coordinates and rebuild
+      `sample.grid.data` once.
+    - We rely on the fact that *all* nonzeros lie in strips; outside strips
+      the matrix is (and remains) all zeros.
+    """
+
     assert los.all_grids_standard()
 
+    # Common shape for all samples
+    n_rows, n_cols = los[0].grid.data.shape
+
+    # ---------------------------------------------------------------
+    # 1) Precompute reference (target) clusters once per strip
+    # ---------------------------------------------------------------
+    strip_infos = []  # list of (strip_start, strip_end, ref_points_coo,
+    #          ref_cluster_df, ref_cluster_to_points)
+
     for strip_start, strip_end in strips:
-        # Reference (target) clusters on the first sample
         ref_points_coo = los[0].grid.data[:, strip_start:strip_end].tocoo()
         ref_cluster_df, ref_cluster_to_points = find_component(ref_points_coo)
-        M = len(ref_cluster_df)  # number of target clusters
+        strip_infos.append(
+            (
+                strip_start,
+                strip_end,
+                ref_points_coo,
+                ref_cluster_df,
+                ref_cluster_to_points,
+            )
+        )
 
-        for sample in los[1:]:  # NOTE: start at 1
+    # ---------------------------------------------------------------
+    # 2) Process each non-reference sample independently
+    #    (natural unit for parallelization)
+    # ---------------------------------------------------------------
+    for sample in los[1:]:  # los[0] is the reference
+
+        all_rows = []
+        all_cols = []
+        all_data = []
+
+        # ---- Per-strip hierarchical OT ------------------------------------
+        for (
+            strip_start,
+            strip_end,
+            ref_points_coo,
+            ref_cluster_df,
+            ref_cluster_to_points,
+        ) in strip_infos:
+
+            # Sample clusters on this strip
             sample_points_coo = sample.grid.data[:, strip_start:strip_end].tocoo()
             sample_cluster_df, sample_cluster_to_points = find_component(
                 sample_points_coo
             )
-            N = len(sample_cluster_df)  # number of source clusters
 
-            # OT between sample clusters (source) and reference clusters (target)
+            N = len(sample_cluster_df)  # # source clusters
+            M = len(ref_cluster_df)  # # target clusters
+
+            if N == 0 or M == 0:
+                continue
+
+            # Cluster-level OT: source = sample clusters, target = ref clusters
             transport_plan = _balanced_ot_with_dustbin_2d(
-                sample_cluster_df[:, :-1],
+                sample_cluster_df[:, :-1],  # (row_mean, col_mean)
                 ref_cluster_df[:, :-1],
-                sample_cluster_df[:, -1],
+                sample_cluster_df[:, -1],  # masses
                 ref_cluster_df[:, -1],
                 dust_cost=dust_cost_comp,
-                axis_weights=[1, 15],  # FIX:
+                axis_weights=[1, 15],
             )  # shape (N, M)
 
-            # Build adjacency on (targets | sources)
-            adj = np.zeros((N + M, N + M))
-            adj[:M, M:] = transport_plan.T  # target -> source block
-            adj[M:, :M] = transport_plan  # source -> target block
+            if np.allclose(transport_plan, 0.0):
+                continue
+
+            # Adjacency on (targets | sources) from the OT plan
+            adj = np.zeros((N + M, N + M), dtype=float)
+            adj[:M, M:] = transport_plan.T  # target -> source
+            adj[M:, :M] = transport_plan  # source -> target
 
             n_comp, labels = scipy.sparse.csgraph.connected_components(
                 adj, directed=False
             )
 
+            # ---- Point-level 2D OT within each connected component -------
             for comp_id in range(n_comp):
-                comp_nodes = np.nonzero(labels == comp_id)[0]  # TODO: optim
+                comp_nodes = np.nonzero(labels == comp_id)[0]
 
-                # Indices of sample/source clusters in this component
                 source_cluster_indices = [c for c in comp_nodes if c >= M]
-                # Indices of reference/target clusters in this component
                 target_cluster_indices = [c for c in comp_nodes if c < M]
 
-                # Map cluster indices to point indices
+                if not source_cluster_indices and not target_cluster_indices:
+                    continue
+
                 source_point_indices = [
                     pt
                     for c in source_cluster_indices
@@ -543,14 +600,10 @@ def ot_component(los, strips, dust_cost, dust_cost_comp):
                     for pt in ref_cluster_to_points(c)
                 ]
 
-                print(
-                    len(source_point_indices),
-                    len(target_point_indices),
-                    comp_id,
-                    n_comp,
-                )
+                if not source_point_indices and not target_point_indices:
+                    continue
 
-                # Build (row, col, intensity) arrays for points in this component
+                # (row, local_col, intensity) arrays for points in this component
                 source = np.array(
                     [
                         sample_points_coo.row[source_point_indices],
@@ -568,21 +621,46 @@ def ot_component(los, strips, dust_cost, dust_cost_comp):
 
                 # 2D OT-with-dustbin at point level within the component
                 tpt_coord, tpt_weights = _balanced_ot_near_target_source_2d(
-                    source[:, :-1],  # source coordinates
-                    target[:, :-1],  # target coordinates
-                    source[:, -1],  # source masses
-                    target[:, -1],  # target masses
+                    source[:, :-1],  # (row, local_col)
+                    target[:, :-1],
+                    source[:, -1],  # source intensities
+                    target[:, -1],  # target intensities
                     dust_cost=dust_cost,
                     axis_weights=[1, 15],
                 )
+                # tpt_coord[:, 0]  -> row index
+                # tpt_coord[:, 1]  -> *local* col index in [0, strip_end-strip_start)
 
-                sample.grid.data[:, strip_start:strip_end] = sp.coo_array(
-                    (tpt_weights, (tpt_coord[:, 0], tpt_coord[:, 1])),
-                    shape=(
-                        sample.grid.data.shape[0],
-                        strip_end - strip_start,
-                    ),
-                ).tocsr()
+                if tpt_weights.size == 0:
+                    continue
+
+                # Accumulate in GLOBAL column coordinates
+                all_rows.append(tpt_coord[:, 0])
+                all_cols.append(tpt_coord[:, 1] + strip_start)
+                all_data.append(tpt_weights)
+
+        # -----------------------------------------------------------
+        # 3) Rebuild this sample's grid from all transported triplets
+        # -----------------------------------------------------------
+        if all_rows:
+            rows = np.concatenate(all_rows).astype(int, copy=False)
+            cols = np.concatenate(all_cols).astype(int, copy=False)
+            data = np.concatenate(all_data).astype(float, copy=False)
+        else:
+            # No mass anywhere -> all zeros
+            rows = np.array([], dtype=int)
+            cols = np.array([], dtype=int)
+            data = np.array([], dtype=float)
+
+        # Outside all strips there were only zeros; we don't need to copy
+        # anything from the old matrix. The new matrix has the same shape
+        # and non-zeros exactly where we wrote them.
+        new_grid = sp.coo_array(
+            (data, (rows, cols)),
+            shape=(n_rows, n_cols),
+        ).tocsr()
+
+        sample.grid.data = new_grid
 
 
 def hierarchical_ot(los, **params):

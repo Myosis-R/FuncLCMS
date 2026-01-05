@@ -68,6 +68,13 @@ def main():
         #     mode="per_list",
         #     name="strip_ot",
         # ),
+        # PipelineStep(
+        #     obj=fr,
+        #     attr="alignment_FR",
+        #     args={},
+        #     mode="per_list",
+        #     name="Fisher_Rao",
+        # ),
         # Per-list plotting
         PipelineStep(
             obj=plot,

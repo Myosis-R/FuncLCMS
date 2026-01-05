@@ -61,7 +61,7 @@ def strip_ot(los, **params):
                 binarize=binarize,
             )
             # In-place replacement of the strip data
-            sample.grid.data[:, start:end] = aligned_block
+            sample.grid.data[:, start:end] = aligned_block  # WARN: slowest line
 
     # TODO: check that inplace works for your grid storage format (csc/csr/etc.)
 
@@ -324,7 +324,7 @@ def _balanced_ot_with_dustbin_1d(
     cost_aug[num_active_bins, num_active_bins] = 0.0  # dustbin -> dustbin
 
     # Balanced Earth Mover's Distance on the compressed + dustbin problem
-    transport_aug = ot.emd(source_aug, target_aug, cost_aug)
+    transport_aug = ot.emd(source_aug, target_aug, cost_aug)  # WARN: slowest line
 
     # Rescale transport plan back to original total mass
     transport_aug *= mass_aug
