@@ -12,6 +12,8 @@ def cache_spectrums(s, with_grid=True):
     # Ensure df is materialized (this triggers loader no matter the source)
     df = s.df
     frames_rt = s.frames_rt
+    reg_a = s.reg_a
+    reg_b = s.reg_b
     date_time = s.date_time
 
     cache_dir = Path(s.path).with_suffix(".cache")
@@ -24,6 +26,7 @@ def cache_spectrums(s, with_grid=True):
     np.savez(
         cache_dir / "convert.npz",
         frames_rt=frames_rt,
+        tof_to_mz=np.array([reg_a, reg_b]),
     )
 
     # ---- meta ----

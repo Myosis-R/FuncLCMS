@@ -323,6 +323,7 @@ class Grid2D:
             new_ds = ds0 * (1 - coefs.T) + ds1 * coefs.T
             new_ds = sp.csr_array(new_ds * mask.reshape((1, -1)))
 
+        new_ds.eliminate_zeros()
         new_ds.resize(tuple(new_shape))
 
         if inplace:

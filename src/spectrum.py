@@ -244,7 +244,9 @@ class Spectrum:
 
         # convert and meta coming from loader
         self.date_time = getattr(load, self.format + "_meta")(self.path)["date_time"]
-        self.frames_rt = getattr(load, self.format + "_convert")(self.path)
+        self.frames_rt, self.reg_a, self.reg_b = getattr(
+            load, self.format + "_convert"
+        )(self.path)
 
         # tabular representation
         self._df = None
@@ -268,6 +270,15 @@ class Spectrum:
 
         self.specification = {keys[i]: [values[i]] for i in range(len(keys))}
         self.specification["time"] = self.date_time
+
+    # converter
+    def tmz_to_mz(self, tmz):
+        assert hasattr(self, "reg_a") and hasattr(self, "reg_b")
+        return (self.reg_a + self.reg_b * tmz) ** 2
+
+    def mz_to_tmz(self, mz):
+        assert hasattr(self, "reg_a") and hasattr(self, "reg_b")
+        return np.round((np.sqrt(mz) - self.reg_a) / self.reg_b)
 
     # ------------------------------------------------------------------
     # df property (unchanged, with your comments)

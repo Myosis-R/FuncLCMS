@@ -1,6 +1,7 @@
 import numpy as np
 import ot
 import scipy.sparse as sp
+from joblib import Parallel, delayed
 
 from strip_utils import find_strip
 
@@ -34,24 +35,29 @@ def strip_ot(los, **params):
     # Optional parameters
     binarize = params.get("binarize", False)
     cost = params.get("cost", "sqeuclidean")
+    n_jobs = params.get("n_jobs", 4)
 
     num_strips = len(strips)
 
+    # 1) Precompute reference histograms once per strip (from los[0])
+    ref_infos = []  # list of (start, end, ref_hist)
     for strip_index, (start, end) in enumerate(strips):
-        print(f"strip {strip_index + 1}/{num_strips}")
-
-        # Reference histogram from the first sample on this strip
+        print(f"precompute strip {strip_index + 1}/{num_strips}")
         ref_block = los[0].grid.data[:, start:end]
         if binarize:
             ref_hist = ref_block.astype(bool).sum(axis=1)
         else:
             ref_hist = ref_block.sum(axis=1)
-
-        # Make sure this is a 1D float array
         ref_hist = np.asarray(ref_hist).ravel().astype(float)
+        ref_infos.append((start, end, ref_hist))
 
-        # Align each sample to that reference
-        for sample in los:
+    samples = list(los)
+
+    # 2) Worker: align one sample on all strips
+    def _align_one_sample(sample):
+        for strip_index, (start, end, ref_hist) in enumerate(ref_infos):
+            # Optional: progress per sample instead of per strip
+            # print(f"sample {id(sample)}: strip {strip_index + 1}/{num_strips}")
             block = sample.grid.data[:, start:end]
             _, aligned_block = ot_align_1d(
                 block,
@@ -60,10 +66,16 @@ def strip_ot(los, **params):
                 cost=cost,
                 binarize=binarize,
             )
-            # In-place replacement of the strip data
-            sample.grid.data[:, start:end] = aligned_block  # WARN: slowest line
+            sample.grid.data[:, start:end] = aligned_block
 
-    # TODO: check that inplace works for your grid storage format (csc/csr/etc.)
+    # 3) Parallel over samples
+    if n_jobs == 1:
+        for sample in samples:
+            _align_one_sample(sample)
+    else:
+        Parallel(n_jobs=n_jobs, prefer="threads")(
+            delayed(_align_one_sample)(sample) for sample in samples
+        )
 
 
 def ot_align_1d(

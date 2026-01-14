@@ -81,14 +81,7 @@ def make_tof_to_mz_converter(tof_indices, mz_values):
         mz_values,
     )
 
-    def tof_to_mz(tof):
-        tof_arr = np.asarray(tof, dtype=np.float64)
-        return (a + b * tof_arr) ** 2
-
-    # you may want access to the parameters too
-    tof_to_mz.a = a
-    tof_to_mz.b = b
-    return tof_to_mz
+    return a, b
 
 
 def d(path):
@@ -99,9 +92,6 @@ def d(path):
             columns=("retention_time", "tof", "intensity", "mz"),  # TODO: optional mz
         )
     )
-    tof_to_mz = make_tof_to_mz_converter(
-        df.tof.values, df.mz.values
-    )  # TODO: add this property to list_of_spectrum or spectrum?
 
     df = df[["retention_time", "tof", "intensity"]]
     # TODO: in case of more dimension
@@ -117,7 +107,16 @@ def d(path):
 def d_convert(path):
     D = OpenTIMS(path)
     frames_rt = D.retention_times[D.ms1_frames - 1]
-    return frames_rt
+    df = pd.DataFrame.from_dict(
+        D.query(
+            frames=D.ms1_frames,
+            columns=("tof", "mz"),  # TODO: optional mz
+        )
+    )
+    reg_a, reg_b = make_tof_to_mz_converter(
+        df.tof.values, df.mz.values
+    )  # TODO: add this property to list_of_spectrum or spectrum?
+    return frames_rt, reg_a, reg_b
 
 
 def d_meta(path):
@@ -156,8 +155,9 @@ def cache_convert(path):
 
     convert = np.load(path / "convert.npz", allow_pickle=False)
     frames_rt = convert["frames_rt"]
+    reg_a, reg_b = convert["tof_to_mz"]
 
-    return frames_rt
+    return frames_rt, reg_a, reg_b
 
 
 def cache_meta(path):
@@ -178,6 +178,58 @@ def cache_grid(path):
     coord0 = np.load(path / "grid_coord0.npy")
     coord1 = np.load(path / "grid_coord1.npy")
     return Grid2D(data, coord0, coord1, axis_names=("rt", "tmz"))
+
+
+def toy(path):
+    """
+    Load a tiny synthetic spectrum stored as CSV with columns:
+    rt, tmz, int
+    (e.g. generated from PNGs by tools/png_to_toy.py)
+    """
+    path = Path(path)
+    df = pd.read_csv(path)
+
+    expected_cols = {"rt", "tmz", "int"}
+    if set(df.columns) != expected_cols:
+        raise ValueError(
+            f"toy file {path} must have exactly columns {expected_cols}, "
+            f"got {set(df.columns)}"
+        )
+
+    # Ensure types and ordering
+    df["rt"] = df["rt"].astype(float)
+    df["tmz"] = df["tmz"].astype(float)
+    df["int"] = df["int"].astype(float)
+
+    df = df.sort_values(["rt", "tmz"]).reset_index(drop=True)
+    return df
+
+
+def toy_convert(path):
+    """
+    Build frames_rt axis for toy spectra.
+
+    Convention:
+    - rt values are integer indices in [0, H-1].
+    - We reconstruct frames_rt as np.arange(0, max_rt + 1).
+    """
+    df = toy(path)
+    if df.empty:
+        raise ValueError(f"Empty toy spectrum: {path}")
+
+    max_rt = int(df["rt"].max())
+    frames_rt = np.arange(0, max_rt + 1, dtype=float)
+    return frames_rt, 0, 0  # FIX: reg a,b
+
+
+def toy_meta(path):
+    """
+    Minimal metadata for toy spectra.
+    Use file mtime as a pseudo acquisition date.
+    """
+    path = Path(path)
+    date_time = dt.fromtimestamp(path.stat().st_mtime)
+    return {"date_time": date_time}
 
 
 def mzml(path):

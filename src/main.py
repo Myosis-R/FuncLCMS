@@ -2,6 +2,7 @@ import numpy as np
 
 import fisher_rao as fr
 import hot
+import validation
 import plot
 import save
 import sot
@@ -11,13 +12,21 @@ from spectrum import List_of_Spectrum
 
 def main():
 
+    # params_data = {
+    #     "analyser": "tof",
+    #     "folder": "Data/Eglantine",
+    #     "format": "cache",  # TODO: both format at the same time
+    #     "name_specification": "date-batch-type-order-drop",
+    #     "name_tweak": True,
+    #     "pattern": "[F]-QC-1[12]",  # TODO: check if one
+    # }
+
     params_data = {
-        "analyser": "tof",
-        "folder": "Data/Eglantine",
-        "format": "cache",  # TODO: both format at the same time
-        "name_specification": "date-batch-type-order-drop",
-        "name_tweak": True,
-        "pattern": "[F]-QC-1[12]",  # TODO: check if one
+        "analyser": "synthetic",
+        "folder": "Data/Toy",  # "Data/Eglantine"
+        "format": "toy",  # TODO: both format at the same time
+        "name_specification": "name",
+        "name_tweak": False,
     }
 
     steps = [
@@ -36,7 +45,7 @@ def main():
             args={
                 "standardize_rt": True,
                 "standardize_tmz": True,
-                "rt_axis": np.linspace(19, 1200, 2000),
+                "rt_axis": np.arange(-1, 17),  # np.linspace(19, 1200, 2000),
                 "tmz_axis": None,
             },
             mode="per_list",
@@ -84,11 +93,15 @@ def main():
             name="TICs_false",
         ),
         PipelineStep(
-            obj=plot,
-            attr="TICs",
-            args={"axis": 0, "boolean": True},
+            obj=validation,
+            attr="validate_compounds",
+            args={
+                "csv_path": "/Data/Eglantine/List-QC-compounds.csv",
+                "delta": 5,
+                "plot": True,
+            },
             mode="per_list",
-            name="TICs_true",
+            name="TICs_false",
         ),
     ]
 
@@ -96,6 +109,7 @@ def main():
 
     los = List_of_Spectrum(params_data)
     los.sort()
+    breakpoint()
 
     pipeline = Pipeline(steps)
     pipeline.run(los)

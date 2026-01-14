@@ -1,10 +1,12 @@
 from functools import partial
+import matplotlib.pyplot as plt
 
 import cc3d
 import numpy as np
 import ot
 import scipy
 import scipy.sparse as sp
+from joblib import Parallel, delayed
 
 from strip_utils import find_strip
 
@@ -71,28 +73,75 @@ def find_component(ds):
         For each cluster: [mean_row, mean_col, sum_intensity].
     cluster_index_fn : callable
         Function mapping a cluster id -> indices of its points in the
-        flattened (row, col, intensity) representation.
+        ORIGINAL COO representation of `ds` (ds.tocoo()).
     """
-    A = ds.todense()
+    # Work in COO so we can relate clusters back to the sparse matrix
+    coo = ds.tocoo()
+    rows_all = coo.row
+    cols_all = coo.col
+    data_all = coo.data
+
+    # Keep only strictly positive intensities: zeros are pure background
+    pos_mask = data_all > 0.0
+    if not np.any(pos_mask):
+        # No positive mass at all -> no clusters
+        empty_stats = np.zeros((0, 3), dtype=float)
+
+        def empty_index_fn(_):
+            return np.array([], dtype=int)
+
+        return empty_stats, empty_index_fn
+
+    # Subset of *positive* entries
+    rows = rows_all[pos_mask]
+    cols = cols_all[pos_mask]
+    intensities = data_all[pos_mask]
+    # Indices of these positives in the ORIGINAL COO arrays
+    orig_indices = np.nonzero(pos_mask)[0]
+
+    # Build a boolean image only on positive entries for cc3d
+    A_bool = np.zeros(ds.shape, dtype=bool)
+    A_bool[rows, cols] = True
 
     labels, _ = cc3d.connected_components(
-        A > 0,
+        A_bool,
         binary_image=True,
         connectivity=8,
         return_N=True,
     )
+    labs = labels[rows, cols]  # component labels for positive entries
 
-    rows, cols = np.nonzero(labels)
-    labs = labels[rows, cols]
-    intensities = A[rows, cols]
+    # Sanity: labs should all be > 0 here, but clip just in case
+    valid = labs > 0
+    if not np.any(valid):
+        empty_stats = np.zeros((0, 3), dtype=float)
 
-    # Sparse cluster labelling if needed later
-    _ = scipy.sparse.coo_array((labs, (rows, cols)), shape=A.shape)
+        def empty_index_fn(_):
+            return np.array([], dtype=int)
 
-    cluster_stats, cluster_index_fn = mean_sum_by_labs(
+        return empty_stats, empty_index_fn
+
+    rows = rows[valid]
+    cols = cols[valid]
+    intensities = intensities[valid]
+    labs = labs[valid]
+    orig_indices = orig_indices[valid]
+
+    # Group by component label: mean(row, col), sum(intensity)
+    cluster_stats, cluster_index_fn_inner = mean_sum_by_labs(
         np.stack([rows, cols, intensities], axis=1),
         labs,
     )
+
+    # Adapt the index function so that it returns INDICES INTO THE
+    # ORIGINAL COO ARRAYS (rows_all/cols_all/data_all), not into the
+    # compressed positive-only subset.
+    def cluster_index_fn(group_id, _orig=orig_indices, _inner=cluster_index_fn_inner):
+        # indices in [0 .. len(rows)-1] for this cluster
+        sub_idx = _inner(group_id)
+        # map back to original COO indices
+        return _orig[sub_idx]
+
     return cluster_stats, cluster_index_fn
 
 
@@ -488,7 +537,7 @@ def _balanced_ot_near_target_source_2d(
     return Z_out, w_out
 
 
-def ot_component(los, strips, dust_cost, dust_cost_comp):
+def ot_component(los, strips, dust_cost, dust_cost_comp, n_jobs=1):
     """
     Hierarchical 2D OT on connected components, per strip, per sample.
 
@@ -530,8 +579,8 @@ def ot_component(los, strips, dust_cost, dust_cost_comp):
     # 2) Process each non-reference sample independently
     #    (natural unit for parallelization)
     # ---------------------------------------------------------------
-    for sample in los[1:]:  # los[0] is the reference
-
+    def _process_single_sample(sample):
+        """Process one sample (non-reference) in place."""
         all_rows = []
         all_cols = []
         all_data = []
@@ -544,13 +593,11 @@ def ot_component(los, strips, dust_cost, dust_cost_comp):
             ref_cluster_df,
             ref_cluster_to_points,
         ) in strip_infos:
-
             # Sample clusters on this strip
             sample_points_coo = sample.grid.data[:, strip_start:strip_end].tocoo()
             sample_cluster_df, sample_cluster_to_points = find_component(
                 sample_points_coo
             )
-
             N = len(sample_cluster_df)  # # source clusters
             M = len(ref_cluster_df)  # # target clusters
 
@@ -578,11 +625,11 @@ def ot_component(los, strips, dust_cost, dust_cost_comp):
             n_comp, labels = scipy.sparse.csgraph.connected_components(
                 adj, directed=False
             )
+            print(n_comp,labels)
 
             # ---- Point-level 2D OT within each connected component -------
             for comp_id in range(n_comp):
                 comp_nodes = np.nonzero(labels == comp_id)[0]
-
                 source_cluster_indices = [c for c in comp_nodes if c >= M]
                 target_cluster_indices = [c for c in comp_nodes if c < M]
 
@@ -618,6 +665,10 @@ def ot_component(los, strips, dust_cost, dust_cost_comp):
                         ref_points_coo.data[target_point_indices],
                     ]
                 ).T
+                print(source)
+                print(target)
+                print(sample_points_coo.todense())
+                breakpoint()
 
                 # 2D OT-with-dustbin at point level within the component
                 tpt_coord, tpt_weights = _balanced_ot_near_target_source_2d(
@@ -628,9 +679,9 @@ def ot_component(los, strips, dust_cost, dust_cost_comp):
                     dust_cost=dust_cost,
                     axis_weights=[1, 15],
                 )
-                # tpt_coord[:, 0]  -> row index
-                # tpt_coord[:, 1]  -> *local* col index in [0, strip_end-strip_start)
 
+                # tpt_coord[:, 0] -> row index
+                # tpt_coord[:, 1] -> *local* col index in [0, strip_end-strip_start)
                 if tpt_weights.size == 0:
                     continue
 
@@ -652,15 +703,25 @@ def ot_component(los, strips, dust_cost, dust_cost_comp):
             cols = np.array([], dtype=int)
             data = np.array([], dtype=float)
 
-        # Outside all strips there were only zeros; we don't need to copy
-        # anything from the old matrix. The new matrix has the same shape
-        # and non-zeros exactly where we wrote them.
         new_grid = sp.coo_array(
             (data, (rows, cols)),
             shape=(n_rows, n_cols),
         ).tocsr()
-
         sample.grid.data = new_grid
+
+    # List of non-reference samples
+    samples = list(los[1:])  # los[0] is the reference
+
+    if n_jobs == 1:
+        # Serial fallback (original behavior)
+        for sample in samples:
+            _process_single_sample(sample)
+    else:
+        # Parallel over samples (threading backend to avoid pickling issues
+        # and to keep in-place updates on `sample` visible)
+        Parallel(n_jobs=n_jobs, prefer="threads")(
+            delayed(_process_single_sample)(sample) for sample in samples
+        )
 
 
 def hierarchical_ot(los, **params):
@@ -670,11 +731,12 @@ def hierarchical_ot(los, **params):
         params["min_zero"],
         optimal=True,
     )
+    if strips is None or len(strips) == 0:
+        return
+
     ot_component(
         los,
         strips,
         dust_cost=params["dust_cost"],
         dust_cost_comp=params["dust_cost_comp"],
     )
-
-    pass
