@@ -32,6 +32,7 @@ class List_of_Spectrum(list):
 
     def __init__(self, params_data):
         self.params_data = params_data
+        self.ref_grid = None
         list_paths = list(
             Path()
             .absolute()
@@ -63,9 +64,9 @@ class List_of_Spectrum(list):
             [pd.DataFrame.from_dict(spec.specification) for spec in self]
         ).reset_index(drop=True)
 
-    def sort(self):
+    def sort(self, by="time"):
         """Sort spectrums by time of analysis"""
-        values = self.specification()["time"].to_list()
+        values = self.specification()[by].to_list()
         order = sorted(range(len(values)), key=values.__getitem__)
         list.__init__(self, [self[o] for o in order])
 
@@ -206,7 +207,7 @@ class List_of_Spectrum(list):
         self.rt_axis = rt_axis
         self.tmz_axis = tmz_axis
 
-    def all_grids_standard(self, rtol=1e-6, atol=1e-12):
+    def all_grids_standard(self, ref=False, rtol=1e-6, atol=1e-12):
         """
         Return True iff all spectra have a Grid2D compatible with the first one.
 
@@ -216,12 +217,15 @@ class List_of_Spectrum(list):
         if len(self) <= 1:
             return True
 
-        # Reference grid from first spectrum
-        ref_grid = self[0]._grid
-        if ref_grid is None:
-            return False
+        # Reference grid from first spectrum or reference
+        if ref:
+            assert self.ref_grid is not None
+            ref_grid = self.ref_grid
+        else:
+            assert self[0]._grid is not None
+            ref_grid = self[0]._grid
 
-        for spec in self[1:]:
+        for spec in self:
             grid = spec._grid
             if grid is None:
                 return False

@@ -7,26 +7,22 @@ from strip_utils import find_strip
 
 
 def strip_ot(los, **params):
-    """
-    Align each strip independently along the first axis using 1D balanced OT
-    with a dustbin cost (cost-threshold OT).
+    """Align each strip independently along the first axis using 1D balanced OT with a dustbin cost (cost-threshold OT).
 
     Parameters in **params
     ----------------------
     min_zero : int
         Minimum run length of zeros to define strips (passed to find_strip).
     dust_cost : float
-        Dustbin cost C_dust. Real-to-dustbin and dustbin-to-real moves cost
-        C_dust, so going through the dustbin instead of direct transport costs
-        2 * C_dust. This acts as a distance threshold.
+        Dustbin cost C_dust.
     binarize : bool, optional (default: False)
-        If True, build the 1D histograms from presence/absence (X > 0)
-        instead of intensities. If False, use the actual intensities.
+        If True, build the 1D histograms from presence/absence (X > 0) instead of intensities.
+        If False, use the actual intensities.
     cost : {"sqeuclidean"}, optional (default: "sqeuclidean")
-        Ground cost on the 1D row grid. Currently only "sqeuclidean"
-        is implemented: C[i, j] = (i - j)**2.
+        Ground cost on the 1D row grid.
     """
-    assert los.all_grids_standard()
+    assert los.all_grids_standard(ref=True)
+    ref_grid = los.ref_grid
 
     # Required parameters
     strips, _ = find_strip(los, params["min_zero"], optimal=True)
@@ -35,15 +31,16 @@ def strip_ot(los, **params):
     # Optional parameters
     binarize = params.get("binarize", False)
     cost = params.get("cost", "sqeuclidean")
-    n_jobs = params.get("n_jobs", 4)
+    n_jobs = params.get("n_jobs", 1)
 
     num_strips = len(strips)
+    n_rows, n_cols = ref_grid.data.shape
 
     # 1) Precompute reference histograms once per strip (from los[0])
     ref_infos = []  # list of (start, end, ref_hist)
     for strip_index, (start, end) in enumerate(strips):
         print(f"precompute strip {strip_index + 1}/{num_strips}")
-        ref_block = los[0].grid.data[:, start:end]
+        ref_block = ref_grid.data[:, start:end]
         if binarize:
             ref_hist = ref_block.astype(bool).sum(axis=1)
         else:
@@ -51,13 +48,15 @@ def strip_ot(los, **params):
         ref_hist = np.asarray(ref_hist).ravel().astype(float)
         ref_infos.append((start, end, ref_hist))
 
-    samples = list(los)
+    samples = list(los)  # align all, including los[0]
 
-    # 2) Worker: align one sample on all strips
+    # 2) Worker: align one sample on all strips, then rebuild sparse once
     def _align_one_sample(sample):
-        for strip_index, (start, end, ref_hist) in enumerate(ref_infos):
-            # Optional: progress per sample instead of per strip
-            # print(f"sample {id(sample)}: strip {strip_index + 1}/{num_strips}")
+        all_rows = []
+        all_cols = []
+        all_data = []
+
+        for start, end, ref_hist in ref_infos:
             block = sample.grid.data[:, start:end]
             _, aligned_block = ot_align_1d(
                 block,
@@ -66,7 +65,42 @@ def strip_ot(los, **params):
                 cost=cost,
                 binarize=binarize,
             )
-            sample.grid.data[:, start:end] = aligned_block
+
+            coo = aligned_block.tocoo()
+            if coo.nnz == 0:
+                continue
+
+            dat = coo.data
+            nz = dat != 0
+            if not np.any(nz):
+                continue
+
+            all_rows.append(coo.row[nz].astype(int, copy=False))
+            all_cols.append((coo.col[nz] + start).astype(int, copy=False))
+            all_data.append(dat[nz].astype(float, copy=False))
+
+        if all_rows:
+            rows = np.concatenate(all_rows).astype(int, copy=False)
+            cols = np.concatenate(all_cols).astype(int, copy=False)
+            data = np.concatenate(all_data).astype(float, copy=False)
+        else:
+            rows = np.array([], dtype=int)
+            cols = np.array([], dtype=int)
+            data = np.array([], dtype=float)
+
+        new_grid = sp.coo_array((data, (rows, cols)), shape=(n_rows, n_cols)).tocsr()
+
+        # Safe cleanups (optional but helps)
+        try:
+            new_grid.sum_duplicates()
+        except Exception:
+            pass
+        try:
+            new_grid.eliminate_zeros()
+        except Exception:
+            pass
+
+        sample.grid.data = new_grid
 
     # 3) Parallel over samples
     if n_jobs == 1:

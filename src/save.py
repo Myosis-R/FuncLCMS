@@ -1,4 +1,5 @@
 from pathlib import Path
+import h5py
 
 import numpy as np
 import scipy.sparse as sp
@@ -48,3 +49,30 @@ def cache_spectrums(s, with_grid=True):
     s.path = cache_dir
 
     return cache_dir
+
+
+def projections(los):
+    assert los.all_grids_standard()
+    dir = Path(los[0].path).parent.joinpath("Proj")
+    dir.mkdir(exist_ok=True)
+
+    with h5py.File(dir / "proj_rt.h5", "w") as f:
+        f.create_dataset(
+            "proj_rt",
+            data=np.array([s.grid.sum_along_axis(axis=0, boolean=False) for s in los]),
+        )
+    with h5py.File(dir / "proj_tof.h5", "w") as f:
+        f.create_dataset(
+            "proj_tof",
+            data=np.array([s.grid.sum_along_axis(axis=1, boolean=False) for s in los]),
+        )
+    with h5py.File(dir / "proj_rt_bool.h5", "w") as f:
+        f.create_dataset(
+            "proj_rt_bool",
+            data=np.array([s.grid.sum_along_axis(axis=0, boolean=True) for s in los]),
+        )
+    with h5py.File(dir / "proj_tof_bool.h5", "w") as f:
+        f.create_dataset(
+            "proj_tof_bool",
+            data=np.array([s.grid.sum_along_axis(axis=1, boolean=True) for s in los]),
+        )

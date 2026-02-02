@@ -537,7 +537,7 @@ def _balanced_ot_near_target_source_2d(
     return Z_out, w_out
 
 
-def ot_component(los, strips, dust_cost, dust_cost_comp, n_jobs=1):
+def ot_component(los, strips, dust_cost, dust_cost_comp, axis_weights, n_jobs):
     """
     Hierarchical 2D OT on connected components, per strip, per sample.
 
@@ -551,10 +551,11 @@ def ot_component(los, strips, dust_cost, dust_cost_comp, n_jobs=1):
       the matrix is (and remains) all zeros.
     """
 
-    assert los.all_grids_standard()
+    assert los.all_grids_standard(ref=True)
+    ref_grid = los.ref_grid
 
     # Common shape for all samples
-    n_rows, n_cols = los[0].grid.data.shape
+    n_rows, n_cols = ref_grid.data.shape
 
     # ---------------------------------------------------------------
     # 1) Precompute reference (target) clusters once per strip
@@ -563,7 +564,7 @@ def ot_component(los, strips, dust_cost, dust_cost_comp, n_jobs=1):
     #          ref_cluster_df, ref_cluster_to_points)
 
     for strip_start, strip_end in strips:
-        ref_points_coo = los[0].grid.data[:, strip_start:strip_end].tocoo()
+        ref_points_coo = ref_grid.data[:, strip_start:strip_end].tocoo()
         ref_cluster_df, ref_cluster_to_points = find_component(ref_points_coo)
         strip_infos.append(
             (
@@ -611,7 +612,7 @@ def ot_component(los, strips, dust_cost, dust_cost_comp, n_jobs=1):
                 sample_cluster_df[:, -1],  # masses
                 ref_cluster_df[:, -1],
                 dust_cost=dust_cost_comp,
-                axis_weights=[1, 15],
+                axis_weights=axis_weights,
             )  # shape (N, M)
 
             if np.allclose(transport_plan, 0.0):
@@ -625,7 +626,6 @@ def ot_component(los, strips, dust_cost, dust_cost_comp, n_jobs=1):
             n_comp, labels = scipy.sparse.csgraph.connected_components(
                 adj, directed=False
             )
-            print(n_comp,labels)
 
             # ---- Point-level 2D OT within each connected component -------
             for comp_id in range(n_comp):
@@ -665,10 +665,6 @@ def ot_component(los, strips, dust_cost, dust_cost_comp, n_jobs=1):
                         ref_points_coo.data[target_point_indices],
                     ]
                 ).T
-                print(source)
-                print(target)
-                print(sample_points_coo.todense())
-                breakpoint()
 
                 # 2D OT-with-dustbin at point level within the component
                 tpt_coord, tpt_weights = _balanced_ot_near_target_source_2d(
@@ -709,8 +705,7 @@ def ot_component(los, strips, dust_cost, dust_cost_comp, n_jobs=1):
         ).tocsr()
         sample.grid.data = new_grid
 
-    # List of non-reference samples
-    samples = list(los[1:])  # los[0] is the reference
+    samples = los
 
     if n_jobs == 1:
         # Serial fallback (original behavior)
@@ -732,11 +727,13 @@ def hierarchical_ot(los, **params):
         optimal=True,
     )
     if strips is None or len(strips) == 0:
-        return
+        return None
 
     ot_component(
         los,
         strips,
         dust_cost=params["dust_cost"],
         dust_cost_comp=params["dust_cost_comp"],
+        axis_weights=params["axis_weights"],
+        n_jobs=params.get("n_jobs", 1),
     )

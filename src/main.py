@@ -2,7 +2,10 @@ import numpy as np
 
 import fisher_rao as fr
 import hot
+import ref_utils
+import align_tmz
 import validation
+import synthetic_toy_cases
 import plot
 import save
 import sot
@@ -12,25 +15,16 @@ from spectrum import List_of_Spectrum
 
 def main():
 
-    # params_data = {
-    #     "analyser": "tof",
-    #     "folder": "Data/Eglantine",
-    #     "format": "cache",  # TODO: both format at the same time
-    #     "name_specification": "date-batch-type-order-drop",
-    #     "name_tweak": True,
-    #     "pattern": "[F]-QC-1[12]",  # TODO: check if one
-    # }
-
     params_data = {
-        "analyser": "synthetic",
-        "folder": "Data/Toy",  # "Data/Eglantine"
-        "format": "toy",  # TODO: both format at the same time
-        "name_specification": "name",
-        "name_tweak": False,
+        "analyser": "tof",
+        "folder": "Data/Eglantine",
+        "format": "cache",  # TODO: both format at the same time
+        "name_specification": "date-batch-type-order-drop",
+        "name_tweak": True,
+        "pattern": "[FGH]-QC-",  # TODO: check if one
     }
 
     steps = [
-        # Per-spectrum step
         # PipelineStep(
         #     obj=List_of_Spectrum,
         #     attr="write",
@@ -38,18 +32,38 @@ def main():
         #     mode="per_list",
         #     name="save_spectrum",
         # ),
-        # Per-list step: standardize_all on List_of_Spectrum
         PipelineStep(
             obj=List_of_Spectrum,
             attr="standardize_all",
             args={
                 "standardize_rt": True,
                 "standardize_tmz": True,
-                "rt_axis": np.arange(-1, 17),  # np.linspace(19, 1200, 2000),
+                "rt_axis": np.linspace(19, 1200, 2000),
                 "tmz_axis": None,
             },
             mode="per_list",
             name="standardize_all",
+        ),
+        # PipelineStep(
+        #     obj=save,
+        #     attr="projections",
+        #     args={},
+        #     mode="per_list",
+        #     name="save_projections",
+        # ),
+        PipelineStep(
+            obj=ref_utils,
+            attr="first_spec",
+            args={},
+            mode="per_list",
+            name="use first spec as ref",
+        ),
+        PipelineStep(
+            obj=align_tmz,
+            attr="translation_grad_tmz",
+            args={},
+            mode="per_list",
+            name="align tmz by translation",
         ),
         PipelineStep(
             obj=hot,
@@ -59,7 +73,9 @@ def main():
                 "min_points": 40000,
                 "dust_cost": 500,
                 "dust_cost_comp": 1000,
+                "axis_weights": [1, 15],  # TODO: Tune it
                 "cost": "sqeuclidean",
+                "n_jobs": 4,
             },
             mode="per_list",
             name="strip_ot",
@@ -86,22 +102,23 @@ def main():
         # ),
         # Per-list plotting
         PipelineStep(
+            obj=validation,
+            attr="validate_compounds",
+            args={
+                "csv_path": "Data/Eglantine/List-QC-compounds.csv",
+                "delta": 3,
+                "plot": True,
+                "charge": "pos",
+            },
+            mode="per_list",
+            name="compounds validation",
+        ),
+        PipelineStep(
             obj=plot,
             attr="TICs",
             args={"axis": 0, "boolean": False},
             mode="per_list",
-            name="TICs_false",
-        ),
-        PipelineStep(
-            obj=validation,
-            attr="validate_compounds",
-            args={
-                "csv_path": "/Data/Eglantine/List-QC-compounds.csv",
-                "delta": 5,
-                "plot": True,
-            },
-            mode="per_list",
-            name="TICs_false",
+            name="plot TICs",
         ),
     ]
 
@@ -109,7 +126,6 @@ def main():
 
     los = List_of_Spectrum(params_data)
     los.sort()
-    breakpoint()
 
     pipeline = Pipeline(steps)
     pipeline.run(los)
