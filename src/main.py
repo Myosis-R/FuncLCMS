@@ -1,16 +1,8 @@
 import numpy as np
 
-import fisher_rao as fr
-import hot
-import ref_utils
-import align_tmz
-import validation
-import synthetic_toy_cases
-import plot
-import save
-import sot
-from pipeline import Pipeline, PipelineStep
-from spectrum import List_of_Spectrum
+from . import hot, sot, fisher_rao, ref_utils, align_tmz, validation, plot, save
+from .pipeline import Pipeline, PipelineStep
+from .spectrum import List_of_Spectrum
 
 
 def main():
@@ -21,7 +13,7 @@ def main():
         "format": "cache",  # TODO: both format at the same time
         "name_specification": "date-batch-type-order-drop",
         "name_tweak": True,
-        "pattern": "[FGH]-QC-",  # TODO: check if one
+        "pattern": "[FGH]-QC",  # TODO: check if one
     }
 
     steps = [
@@ -58,13 +50,13 @@ def main():
             mode="per_list",
             name="use first spec as ref",
         ),
-        PipelineStep(
-            obj=align_tmz,
-            attr="translation_grad_tmz",
-            args={},
-            mode="per_list",
-            name="align tmz by translation",
-        ),
+        # PipelineStep(
+        #     obj=align_tmz,
+        #     attr="translation_grad_tmz",
+        #     args={},
+        #     mode="per_list",
+        #     name="align tmz by translation",
+        # ),
         PipelineStep(
             obj=hot,
             attr="hierarchical_ot",
@@ -78,7 +70,7 @@ def main():
                 "n_jobs": 4,
             },
             mode="per_list",
-            name="strip_ot",
+            name="hierarchical OT",
         ),
         # PipelineStep(
         #     obj=sot,
@@ -89,14 +81,17 @@ def main():
         #         "dust_cost": 500,  # ~20 index ~ 10 seconds !nop
         #         "cost": "sqeuclidean",
         #         "binarize": False,
+        #         "n_jobs": 4,
         #     },
         #     mode="per_list",
         #     name="strip_ot",
         # ),
         # PipelineStep(
-        #     obj=fr,
+        #     obj=fisher_rao,
         #     attr="alignment_FR",
-        #     args={},
+        #     args={
+        #         "binarize": False,
+        #     },
         #     mode="per_list",
         #     name="Fisher_Rao",
         # ),
@@ -106,7 +101,7 @@ def main():
             attr="validate_compounds",
             args={
                 "csv_path": "Data/Eglantine/List-QC-compounds.csv",
-                "delta": 3,
+                "delta": 5,
                 "plot": True,
                 "charge": "pos",
             },
@@ -128,6 +123,7 @@ def main():
     los.sort()
 
     pipeline = Pipeline(steps)
+    # id_utils.build_run_id(los, pipeline)  # TODO:
     pipeline.run(los)
     pipeline.print_timings()
 

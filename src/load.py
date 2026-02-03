@@ -12,7 +12,7 @@ import pyopenms as oms
 import scipy.sparse as sp
 from opentimspy.opentims import OpenTIMS
 
-from grid2d import Grid2D
+from .grid2d import Grid2D
 
 transform = {
     "tof": lambda m, e, l, v: np.sqrt(m * l**2 / (2 * e * v)),

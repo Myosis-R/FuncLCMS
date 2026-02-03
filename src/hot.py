@@ -8,7 +8,7 @@ import scipy
 import scipy.sparse as sp
 from joblib import Parallel, delayed
 
-from strip_utils import find_strip
+from .strip_utils import find_strip
 
 
 def g_f(group_id, _ndx, _pos, _count):

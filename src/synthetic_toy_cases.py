@@ -1,10 +1,9 @@
 import numpy as np
-from spectrum import List_of_Spectrum
+from .spectrum import List_of_Spectrum, Spectrum
 import matplotlib.pyplot as plt
 import scipy.sparse as sp
-from spectrum import Spectrum
-from sot import ot_align_1d
-from hot import _balanced_ot_near_target_source_2d
+from .sot import ot_align_1d
+from .hot import _balanced_ot_near_target_source_2d
 
 
 from grid2d import Grid2D

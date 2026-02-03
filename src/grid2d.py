@@ -228,8 +228,7 @@ class Grid2D:
             if axis == 0:
                 new_data = self._data[sl[0], :]
             else:
-                # slicing CSR by columns is not super efficient but OK
-                new_data = self._data[:, sl[1]]
+                new_data = self._data.tocsc()[:, sl[1]].tocsr()
             new_coord = coord[start:end]
 
         if inplace:
@@ -309,19 +308,30 @@ class Grid2D:
         new_shape[axis] = len(out_coord)
 
         # Build new sparse data, similar logic to your tools.interpolation
+
         if axis == 0:
-            # interpolate rows: ds[idxs-1, :] and ds[idxs, :]
             ds0 = ds[idxs - 1, :]
             ds1 = ds[idxs, :]
-            # mask[row] == 0 -> zero row
-            new_ds = (1 - coefs) * ds0 + coefs * ds1
-            new_ds = sp.csc_array(mask.reshape((-1, 1)) * new_ds)
+
+            # elementwise row scaling:
+            w0 = sp.csr_array(1.0 - coefs)  # shape (n_out, 1)
+            w1 = sp.csr_array(coefs)
+
+            new_ds = ds0.multiply(w0) + ds1.multiply(w1)
+            new_ds = new_ds.multiply(mask.reshape((-1, 1)))
+
+            new_ds = new_ds.tocsr()
         else:
-            # axis == 1: interpolate columns
             ds0 = ds[:, idxs - 1]
             ds1 = ds[:, idxs]
-            new_ds = ds0 * (1 - coefs.T) + ds1 * coefs.T
-            new_ds = sp.csr_array(new_ds * mask.reshape((1, -1)))
+
+            # elementwise column scaling:
+            w0 = sp.csc_array(1.0 - coefs.T)  # shape (1, n_out)
+            w1 = sp.csc_array(coefs.T)
+
+            new_ds = ds0.multiply(w0) + ds1.multiply(w1)
+            new_ds = new_ds.multiply(mask.reshape((1, -1)))
+            new_ds = new_ds.tocsr()  # normalize internal storage
 
         new_ds.eliminate_zeros()
         new_ds.resize(tuple(new_shape))

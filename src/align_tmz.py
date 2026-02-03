@@ -17,7 +17,9 @@ def translation_grad_tmz(los):  # TODO: change ref, add axis
         translation = minimize(translation_f, 0, args=(ref_tic, tics[i]))[
             "x"
         ]  # TODO: bound ?
-        s.grid.interpolate_axis(
-            axis=1, out_coord=s.ds_coord[1], in_coord=(s.ds_coord[1] - translation)
+        s.grid = s.grid.interpolate_axis(
+            axis=1,
+            out_coord=s.grid.coords[1],
+            in_coord=(s.grid.coords[1] - translation),
         )
     assert los.all_grids_standard()

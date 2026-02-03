@@ -3,7 +3,7 @@ import ot
 import scipy.sparse as sp
 from joblib import Parallel, delayed
 
-from strip_utils import find_strip
+from .strip_utils import find_strip
 
 
 def strip_ot(los, **params):

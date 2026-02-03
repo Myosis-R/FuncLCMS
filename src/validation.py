@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 import pandas as pd
 from pathlib import Path
 
@@ -35,8 +36,11 @@ def validate_compounds(los, **params):
     for compound in compounds_table[["rt", "tmz"]].values:
         error = extract_compound(los, compound, delta=params["delta"])
         error_table[[f"{compound}_rt", f"{compound}_mz"]] = error
+    error_table = error_table - error_table.mean()
     if params["plot"]:
-        error_table.boxplot()
+        error_table.iloc[:, ::2].boxplot()
+        fig, ax = plt.subplots()
+        error_table.iloc[:, 1::2].boxplot()
     error_rt = np.nanmedian(np.abs(error_table.values[:, ::2]))
     error_tmz = np.nanmedian(np.abs(error_table.values[:, 1::2]))
     print(

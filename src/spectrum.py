@@ -10,9 +10,8 @@ import scipy.sparse as sp
 from opentimspy.opentims import OpenTIMS
 from pyopenms import MSExperiment, MzMLFile
 
-import load
-import save
-from grid2d import Grid2D
+from . import save, load
+from .grid2d import Grid2D
 
 
 class List_of_Spectrum(list):
@@ -315,6 +314,13 @@ class Spectrum:
         """
         df = self.df  # ensures loader has run
         points_rt = df.rt.values
+        assert np.all(points_rt[1:] >= points_rt[:-1]), "df must be sorted by rt"
+
+        tmz_vals = df.tmz.values
+        assert np.all(
+            np.isclose(tmz_vals, np.round(tmz_vals))
+        ), "tmz must be integer-binned"
+        tmz_vals = tmz_vals.astype(int)
         if points_rt.size == 0:
             raise ValueError("Empty df, cannot build grid")
 
@@ -332,7 +338,6 @@ class Spectrum:
         )
 
         # tmz range
-        tmz_vals = df.tmz.values
         min_tmz = int(np.amin(tmz_vals))
         max_tmz = int(np.amax(tmz_vals))
 
@@ -343,6 +348,8 @@ class Spectrum:
         rows = cat_rt - frame[0]
         # column indices: shift so that min_tmz -> col 0
         cols = tmz_vals - min_tmz
+        cols = cols.astype(int, copy=False)
+        rows = rows.astype(int, copy=False)
         data = df.int.values
 
         sparse_2d = sp.coo_array(
