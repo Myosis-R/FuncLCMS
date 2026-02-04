@@ -10,10 +10,10 @@ def main():
     params_data = {
         "analyser": "tof",
         "folder": "Data/Eglantine",
-        "format": "cache",  # TODO: both format at the same time
+        "format": "d",  # TODO: both format at the same time
         "name_specification": "date-batch-type-order-drop",
         "name_tweak": True,
-        "pattern": "[FGH]-QC-2",  # TODO: check if one
+        "pattern": "[FGH]-QC20-2",  # TODO: check if one
     }
 
     steps = [

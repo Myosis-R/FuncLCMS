@@ -283,7 +283,7 @@ def _balanced_ot_near_target_source_2d(
 
     if a is None:
         source_weights = np.ones(N, dtype=float)
-    else:  # FIX: a is size 0 at point level
+    else:
         source_weights = np.asarray(a, dtype=float)
 
     mass_sent_to_targets = Gamma_full.sum(axis=1)
@@ -366,7 +366,19 @@ def ot_component(los, strips, dust_cost, dust_cost_comp, axis_weights, n_jobs):
 
             N = sample_stats.shape[0]  # source components
             M = ref_stats.shape[0]  # target components
-            if N == 0 or M == 0:
+            if N == 0:
+                continue
+
+            if M == 0:
+                # Keep original sample strip mass (positive entries only)
+                sample_coo = sample_block.tocoo()
+                pos = sample_coo.data > 0
+                if np.any(pos):
+                    all_rows.append(sample_coo.row[pos].astype(int, copy=False))
+                    all_cols.append(
+                        (sample_coo.col[pos] + strip_start).astype(int, copy=False)
+                    )
+                    all_data.append(sample_coo.data[pos].astype(float, copy=False))
                 continue
 
             # --- (a) Component-level OT (centroids + masses)
@@ -399,6 +411,8 @@ def ot_component(los, strips, dust_cost, dust_cost_comp, axis_weights, n_jobs):
                 ref_comp_ids = [int(x) for x in nodes if x < M]  # 0..M-1
                 src_comp_ids = [int(x - M) for x in nodes if x >= M]  # 0..N-1
 
+                if len(src_comp_ids) == 0:
+                    continue
                 # Gather pixels for this group (local strip coords)
                 src_xy, src_w = _gather_points_from_components(
                     sample_csc, sample_res, src_comp_ids
@@ -406,9 +420,6 @@ def ot_component(los, strips, dust_cost, dust_cost_comp, axis_weights, n_jobs):
                 ref_xy, ref_w = _gather_points_from_components(
                     ref_csc, ref_res, ref_comp_ids
                 )
-
-                if src_w.size == 0 and ref_w.size == 0:
-                    continue
 
                 tpt_coord, tpt_weights = _balanced_ot_near_target_source_2d(
                     src_xy,
