@@ -6,7 +6,7 @@ from .sot import ot_align_1d
 from .hot import _balanced_ot_near_target_source_2d
 
 
-from grid2d import Grid2D
+from .grid2d import Grid2D
 
 
 def ensure_common_toy_grid(los, size=16):

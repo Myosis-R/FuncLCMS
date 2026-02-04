@@ -13,7 +13,7 @@ def main():
         "format": "cache",  # TODO: both format at the same time
         "name_specification": "date-batch-type-order-drop",
         "name_tweak": True,
-        "pattern": "[FGH]-QC",  # TODO: check if one
+        "pattern": "[FGH]-QC-2",  # TODO: check if one
     }
 
     steps = [
@@ -67,7 +67,7 @@ def main():
                 "dust_cost_comp": 1000,
                 "axis_weights": [1, 15],  # TODO: Tune it
                 "cost": "sqeuclidean",
-                "n_jobs": 4,
+                "n_jobs": 1,
             },
             mode="per_list",
             name="hierarchical OT",
